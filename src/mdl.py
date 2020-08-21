@@ -235,8 +235,8 @@ class AnimationValueData(Structure):
 
 class AnimationValueHeader(Structure):
     _fields_ = [
-        ('total', c_uint8),
-        ('valid', c_uint8)
+        ('valid', c_uint8),
+        ('total', c_uint8)
     ]
 
 
