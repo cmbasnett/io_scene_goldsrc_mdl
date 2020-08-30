@@ -5,7 +5,6 @@ import os
 import math
 from mathutils import Vector, Matrix, Quaternion
 from bpy.props import StringProperty, BoolProperty, IntProperty, FloatProperty, CollectionProperty
-import numpy
 from .reader import MdlReader
 from .mdl import *
 
@@ -28,9 +27,9 @@ class MDL_OT_ImportOperator(bpy.types.Operator, bpy_extras.io_utils.ImportHelper
     should_import_textures: BoolProperty(default=True)
     should_import_geometry: BoolProperty(default=True)
     should_import_hitboxes: BoolProperty(default=True)
-    should_import_skeleton: BoolProperty(default=True)
     should_import_attachments: BoolProperty(default=True)
     should_import_materials: BoolProperty(default=True)
+    should_import_animations: BoolProperty(default=False)
 
     def import_mdl(self, mdl):
         model_name = os.path.splitext(os.path.basename(mdl.file_path))[0]
@@ -113,7 +112,6 @@ class MDL_OT_ImportOperator(bpy.types.Operator, bpy_extras.io_utils.ImportHelper
 
         if self.should_import_geometry:
             for body_part in mdl.body_parts:
-                # TODO: collection for body parts?? maybe an empty?? one big mesh?
                 for model in body_part.models:
                     for mesh in model.meshes:
                         model_name = f'{body_part.name.decode()}_{model.name.decode()}'
@@ -134,15 +132,15 @@ class MDL_OT_ImportOperator(bpy.types.Operator, bpy_extras.io_utils.ImportHelper
 
                         for vertex_index, vertex in enumerate(model.vertices):
                             vertex_bone = mdl.bones[model.vertex_bone_indices[vertex_index]]
-                            v = vertex_bone.transform.dot(numpy.array(vertex + (1,)))
-                            bm.verts.new(v[:3])
+                            v = vertex_bone.transform @ Vector((vertex[0], vertex[1], vertex[2]))
+                            bm.verts.new(v)
 
                         bm.verts.ensure_lookup_table()
 
                         texture = mdl.textures[mesh.texture_index]
                         uvs = []
-
                         triangle_hashes = set()
+                        vertex_bone_indices = model.vertex_bone_indices.copy()
 
                         for face in mesh.faces:
                             triangles = []
@@ -171,14 +169,13 @@ class MDL_OT_ImportOperator(bpy.types.Operator, bpy_extras.io_utils.ImportHelper
                                 # Calculate the unique hash for the triangle
                                 triangle_hash = (indices[0]) | (indices[1] << 12) | (indices[2] << 24)
                                 if triangle_hash in triangle_hashes:
-                                    d = len(bm.verts)
-                                    a = bm.verts[triangle[0]].co
-                                    b = bm.verts[triangle[1]].co
-                                    c = bm.verts[triangle[2]].co
-                                    bm.verts.new(a)
-                                    bm.verts.new(b)
-                                    bm.verts.new(c)
-                                    triangles[triangle_index] = [d + 0, d + 1, d + 2]
+                                    # TODO: these new verts do not get weighted correctly!
+                                    vertices = [bm.verts[index].co for index in triangle]
+                                    bm_vertex_count = len(bm.verts)
+                                    for vertex in vertices:
+                                        bm.verts.new(vertex)
+                                    triangles[triangle_index] = [bm_vertex_count + i for i in range(3)]
+                                    vertex_bone_indices.extend([vertex_bone_indices[triangle[x]] for x in range(3)])
                                     bm.verts.ensure_lookup_table()
                                 else:
                                     triangle_hashes.add(triangle_hash)
@@ -208,7 +205,7 @@ class MDL_OT_ImportOperator(bpy.types.Operator, bpy_extras.io_utils.ImportHelper
                         armature_modifier.object = armature_object
 
                         ''' Assign vertex weighting. '''
-                        for (vertex_index, vertex_bone_index) in enumerate(model.vertex_bone_indices):
+                        for (vertex_index, vertex_bone_index) in enumerate(vertex_bone_indices):
                             vertex_group_name = mdl.bones[vertex_bone_index].name.decode()  # TODO: slow
                             vertex_group = mesh_object.vertex_groups[vertex_group_name]
                             vertex_group.add([vertex_index], 1.0, 'REPLACE')
@@ -219,6 +216,24 @@ class MDL_OT_ImportOperator(bpy.types.Operator, bpy_extras.io_utils.ImportHelper
 
         bpy.ops.object.mode_set(mode='OBJECT')
 
+        if self.should_import_animations:
+            armature_object.animation_data_create()
+            actions = []
+            for sequence_index, sequence in enumerate(mdl.sequences):
+                action = bpy.data.actions.new(name=sequence.name.decode())
+                armature_object.animation_data.action = action
+                blend_index = 0
+                for frame_index in range(sequence.frame_count):
+                    bpy.context.scene.frame_set(frame_index)
+                    bone_matrices = mdl.calc_bone_matrices(sequence_index, blend_index, frame_index)
+                    for bone_index, (bone, bone_matrix) in enumerate(zip(mdl.bones, bone_matrices)):
+                        pose_bone = armature_object.pose.bones[bone_index]
+                        pose_bone.matrix = Matrix(bone_matrix)
+                        pose_bone.keyframe_insert('location')
+                        pose_bone.keyframe_insert('rotation_quaternion')
+                actions.append(action)
+            armature_object.animation_data.action = actions[0]
+            bpy.context.scene.frame_set(0)
 
     def execute(self, context):
         mdl = MdlReader.from_file(self.filepath)

@@ -2,7 +2,7 @@
 
 from ctypes import *
 from enum import Enum
-import numpy
+from mathutils import Euler, Quaternion, Matrix
 import math
 
 
@@ -224,12 +224,13 @@ class FaceVertex(Structure):
 
 class Animation(object):
     def __init__(self):
+        self.value_offsets = [0] * 6
         self.values = [[]] * 6
 
 
 class AnimationValueData(Structure):
     _fields_ = [
-        ('value', c_uint16)
+        ('value', c_int16)
     ]
 
 
@@ -247,31 +248,6 @@ class AnimationValue(Union):
     ]
 
 
-class BonePose(object):
-    def __init__(self):
-        self.location = numpy.array(3)
-        self.rotation = numpy.array(3)
-        self.rotation_quat = numpy.array(4)
-
-
-# TODO: move this shit elsewhere
-def calc_matrix(px, py, pz, rx, ry, rz):
-    cos = math.cos
-    sin = math.sin
-    return numpy.array([
-        [cos(ry) * cos(rz), sin(rx) * sin(ry) * cos(rz) + cos(rx) * -sin(rz), cos(rx) * sin(ry) * cos(rz) + -sin(rx) * -sin(rz), px],
-        [cos(ry) * sin(rz), sin(rx) * sin(ry) * sin(rz) + cos(rx) * cos(rz), cos(rx) * sin(ry) * sin(rz) + -sin(rx) * cos(rz), py],
-        [-sin(ry), sin(rx) * cos(ry), cos(rx) * cos(ry), pz],
-        [0, 0, 0, 1]
-    ])
-
-
-def get_bone_transform(bone):
-    rx, ry, rz = bone.rotation  # roll, pitch, yaw
-    px, py, pz = bone.location
-    return calc_matrix(px, py, pz, rx, ry, rz)
-
-
 class Mdl(object):
     def __init__(self):
         self.file_path = ''
@@ -283,15 +259,28 @@ class Mdl(object):
         self.skin_families = []
         self.body_parts = []
 
+    # TODO: we need the damned bind pose
+
     def calc_bone_matrices(self, sequence_index: int, blend_index: int, frame_index: int):
         sequence = self.sequences[sequence_index]
+        world_bone_matrices = [None] * len(self.bones)
+        bone_matrices = [None] * len(self.bones)
         for bone_index, bone in enumerate(self.bones):
             animation = sequence.animations[blend_index * len(self.bones) + bone_index]
-            location, rotation = calc_bone_matrix(frame_index, bone, animation)
-            # TODO: create a matrix right here
+            world_bone_matrix = calc_bone_matrix(frame_index, bone, animation)
+            world_bone_matrices[bone_index] = world_bone_matrix
+            if bone.parent_index >= 0:
+                inverse_parent_world_bone_matrix = world_bone_matrices[bone.parent_index]
+                inverse_parent_world_bone_matrix.invert()
+            else:
+                inverse_parent_world_bone_matrix = Matrix.Identity(4)
+
+            # TODO: backwards??
+            bone_matrices[bone_index] = world_bone_matrix @ inverse_parent_world_bone_matrix
+        return bone_matrices
 
 
-# TODO: this can probably be simplified to be all encompassing
+# TODO: we probably need to multiply by the inverse bind pose for the bone
 def calc_bone_matrix(frame_index: int, bone, animation):
     px, py, pz = bone.location
     rx, ry, rz = bone.rotation
@@ -307,7 +296,9 @@ def calc_bone_matrix(frame_index: int, bone, animation):
         ry = extract_animation_value(frame_index, animation.values[4], bone.rotation_scale[1], bone.rotation[1])
     if animation.value_offsets[5] > 0:
         rz = extract_animation_value(frame_index, animation.values[5], bone.rotation_scale[2], bone.rotation[2])
-    return calc_matrix(px, py, pz, rx, ry, rz)
+    rotation_matrix = Euler((rx, ry, rz), 'XYZ').to_matrix().to_4x4()
+    translation_matrix = Matrix.Translation((px, py, pz))
+    return translation_matrix @ rotation_matrix  # TODO: might be backwards? who knows
 
 
 def extract_animation_value(frame_index: int, values, scale: float, base_value: float):
@@ -315,10 +306,32 @@ def extract_animation_value(frame_index: int, values, scale: float, base_value: 
     value_index = 0
     while values[value_index].header.total <= k:
         k -= values[value_index].header.total
-        value_index += values[value_index].header.value + 1
+        value_index += values[value_index].header.valid + 1
         if value_index >= len(values) or values[value_index].header.total == 0:
             raise RuntimeError('uh oh')
     if values[value_index].header.valid > k:
         return values[value_index + k + 1].data.value * scale + base_value
     else:
-        return values[value_index + values[value_index].header.valid].header.value * scale + base_value
+        return values[value_index + values[value_index].header.valid].data.value * scale + base_value
+
+
+def euler_angles_to_quaternion(rx, ry, rz):
+    pitch = rx
+    yaw = ry
+    roll = rz
+
+    sp = math.sin(pitch * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sy = math.sin(yaw * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sr = math.sin(roll * 0.5)
+    cr = math.cos(roll * 0.5)
+
+    cpcy = cp * cy
+    spsy = sp * sy
+
+    w = cr * cpcy + sr * spsy
+    x = sr * cpcy - cr * spsy
+    y = cr * sp * cy + sr * cp * sy
+    z = cr * cp * sy - sr * sp * cy
+    return w, x, y, z

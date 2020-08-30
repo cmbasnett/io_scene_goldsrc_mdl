@@ -1,6 +1,7 @@
 from .mdl import *
 from ctypes import sizeof
 from typing import Type
+from mathutils import Euler, Matrix
 import struct
 import math
 import numpy
@@ -15,29 +16,12 @@ def read_chunk(file, offset: int, cls: Type[Structure], count: int):
     return [cls.from_buffer_copy(file.read(sizeof(cls))) for _ in range(count)]
 
 
-def get_bone_rotation_transform(bone):
-    r, p, y = bone.rotation
-    cos = math.cos
-    sin = math.sin
-    return numpy.array([
-        [cos(p) * cos(y), sin(r) * sin(p) * cos(y) + cos(r) * -sin(y), cos(r) * sin(p) * cos(y) + -sin(r) * -sin(y), 0],
-        [cos(p) * sin(y), sin(r) * sin(p) * sin(y) + cos(r) * cos(y), cos(r) * sin(p) * sin(y) + -sin(r) * cos(y), 0],
-        [-sin(p), sin(r) * cos(p), cos(r) * cos(p), 0],
-        [0, 0, 0, 1]
-    ])
-
-
 def get_bone_transform(bone):
     r, p, y = bone.rotation
     px, py, pz = bone.location
-    cos = math.cos
-    sin = math.sin
-    return numpy.array([
-        [cos(p) * cos(y), sin(r) * sin(p) * cos(y) + cos(r) * -sin(y), cos(r) * sin(p) * cos(y) + -sin(r) * -sin(y), px],
-        [cos(p) * sin(y), sin(r) * sin(p) * sin(y) + cos(r) * cos(y), cos(r) * sin(p) * sin(y) + -sin(r) * cos(y), py],
-        [-sin(p), sin(r) * cos(p), cos(r) * cos(p), pz],
-        [0, 0, 0, 1]
-    ])
+    rotation_matrix = Euler((r, p, y), 'XYZ').to_matrix().to_4x4()
+    translation_matrix = Matrix.Translation((px, py, pz))
+    return rotation_matrix @ translation_matrix
 
 
 class MdlReader(object):
@@ -119,12 +103,11 @@ class MdlReader(object):
                         animation_file_offset = f.tell()
                         animation = Animation()
                         # There are 6 channels, px, py, pz, rx, ry, rz (r values are euler angles)
-                        animation_value_offsets = [-1] * 6
-                        for offset_index in range(len(animation_value_offsets)):
-                            animation_value_offsets[offset_index] = unpack('H', f)[0]
-                            if animation_value_offsets[offset_index] > 0:
+                        for offset_index in range(len(animation.value_offsets)):
+                            animation.value_offsets[offset_index] = unpack('h', f)[0]
+                            if animation.value_offsets[offset_index] > 0:
                                 pos = f.tell()
-                                f.seek(animation_file_offset + animation_value_offsets[offset_index])
+                                f.seek(animation_file_offset + animation.value_offsets[offset_index])
                                 animation.values[offset_index] = read_animation_values(sequence.frame_count, f)
                                 f.seek(pos)
                         sequence.animations.append(animation)
@@ -132,12 +115,12 @@ class MdlReader(object):
         # Calculate bone transforms
         for bone in mdl.bones:
             bone.local_transform = get_bone_transform(bone)
-            bone.local_rotation_transform = get_bone_rotation_transform(bone)
             if bone.parent_index >= 0:
                 parent_bone_transform = mdl.bones[bone.parent_index].transform
             else:
-                parent_bone_transform = numpy.identity(4)
-            bone.transform = parent_bone_transform.dot(bone.local_transform)
+                parent_bone_transform = Matrix.Identity(4)
+            # TODO: backwards??
+            bone.transform = parent_bone_transform @ bone.local_transform
 
         return mdl
 
@@ -149,7 +132,8 @@ def read_animation_values(frame_count, f):
         if value.header.total == 0:
             raise RuntimeError('an error occurred while reading animation values')
         frame_count -= value.header.total
-        animation_values.append(value.data.value)
+        animation_values.append(value)
         if value.header.valid > 0:
-            animation_values.extend(unpack(f'{value.header.valid}h', f))
+            # TODO: this needs to be the structs
+            animation_values.extend(read_chunk(f, f.tell(), AnimationValue, value.header.valid))
     return animation_values
